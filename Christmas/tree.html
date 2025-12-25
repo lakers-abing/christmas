@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Christmas Memory Shards - Vibrant Edition</title>
+    <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@700&display=swap" rel="stylesheet">
+    <style>
+        /* CSS样式保持不变，维持原有的UI框架 */
+        :root { --gold: #d4af37; --cream: #fceea7; --bg: #000000; }
+        body, html { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background-color: var(--bg); font-family: 'Times New Roman', serif; }
+        #ui-layer { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; z-index: 10; transition: opacity 0.8s ease; }
+        .ui-hidden { opacity: 0; pointer-events: none; }
+        #loader { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: var(--bg); display: flex; flex-direction: column; justify-content: center; align-items: center; z-index: 100; transition: opacity 1s ease; }
+        .spinner { width: 40px; height: 40px; border: 1px solid rgba(212, 175, 55, 0.2); border-top: 1px solid var(--gold); border-radius: 50%; animation: spin 1s linear infinite; }
+        #start-btn { display: none; padding: 15px 40px; background: transparent; border: 1px solid var(--gold); color: var(--gold); cursor: pointer; font-family: 'Cinzel'; letter-spacing: 4px; transition: 0.3s; }
+        #start-btn:hover { background: var(--gold); color: black; box-shadow: 0 0 20px var(--gold); }
+        h1 { position: absolute; top: 5%; width: 100%; text-align: center; font-family: 'Cinzel', serif; font-size: 56px; margin: 0; background: linear-gradient(to bottom, #ffffff, var(--gold)); -webkit-background-clip: text; -webkit-text-fill-color: transparent; filter: drop-shadow(0 0 15px rgba(212, 175, 55, 0.5)); }
+        .upload-wrapper { position: absolute; bottom: 8%; left: 50%; transform: translateX(-50%); display: flex; flex-direction: column; align-items: center; pointer-events: auto; }
+        .btn-upload { padding: 10px 25px; border: 1px solid var(--gold); background: rgba(255, 255, 255, 0.05); backdrop-filter: blur(10px); color: var(--gold); cursor: pointer; letter-spacing: 2px; font-size: 13px; }
+        .hint { color: rgba(252, 238, 167, 0.6); font-size: 11px; margin-top: 10px; text-transform: uppercase; letter-spacing: 1px; }
+        #webcam-container { position: absolute; bottom: 20px; right: 20px; width: 160px; height: 120px; opacity: 0; pointer-events: none; }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+    </style>
+
+    <script type="importmap">
+    {
+        "imports": {
+            "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+            "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/",
+            "@mediapipe/tasks-vision": "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.3/+esm"
+        }
+    }
+    </script>
+</head>
+<body>
+
+    <div id="loader">
+        <div class="spinner" id="spinner"></div>
+        <button id="start-btn">IGNITE THE FESTIVAL</button>
+    </div>
+
+    <div id="ui-layer">
+        <h1>Merry Christmas</h1>
+        <div class="upload-wrapper">
+            <label class="btn-upload">
+                NEW MEMORY
+                <input type="file" id="photo-upload" accept="image/*" hidden>
+            </label>
+            <div class="hint">PINCH TO SUMMON PHOTOS | PRESS 'H' TO HIDE UI</div>
+        </div>
+    </div>
+
+    <div id="webcam-container"><video id="video" autoplay playsinline></video></div>
+    <canvas id="three-canvas"></canvas>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+        import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+        import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+        import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
+        import { HandLandmarker, FilesetResolver } from '@mediapipe/tasks-vision';
+
+        // --- 核心状态与扩展色彩配置 ---
+        const STATE = { 
+            MODE: 'TREE', focusTarget: null, uiVisible: true, photoIndex: 0, lastGestureTime: 0,
+            photoUrls: [ // 替换为你实际的图片路径
+                '16697f3825fdcec1c0aac191b297347d_720.png', '2902dc45eca3e02811ad06f17e9797c6_720.png',
+                '20fd733075e6c631f6d5f454fcf2c238_720.png', '6e129841ee0b99e127fac02dc1af93a7_720.png'
+            ]
+        };
+
+        // 新增更丰富的节日色彩库
+        const PALETTE = {
+            gold: 0xffd700, silver: 0xc0c0c0,
+            ruby: 0xe0115f, emerald: 0x50c878, sapphire: 0x0f52ba, amethyst: 0x9966cc,
+            emissiveWarm: 0xffaa33, // 暖光灯色彩
+            candyRed: 0xff0000, candyWhite: 0xffffff
+        };
+        const DECO_COLORS = [PALETTE.gold, PALETTE.silver, PALETTE.ruby, PALETTE.emerald, PALETTE.sapphire, PALETTE.amethyst];
+
+        // --- 粒子类定义 ---
+        class MagicElement {
+            constructor(mesh, type = 'DECO') {
+                this.mesh = mesh;
+                this.type = type;
+                this.baseScale = mesh.scale.clone();
+                this.targetPos = new THREE.Vector3();
+                this.targetRot = new THREE.Euler();
+                this.targetScale = new THREE.Vector3(1,1,1);
+                // 为不同类型的装饰添加一些随机自转
+                this.autoRotate = type === 'DECO' || type === 'JEWEL' ? new THREE.Vector3(Math.random()*0.02, Math.random()*0.02, Math.random()*0.02) : null;
+            }
+            update(lerpFactor, audioImpact) {
+                this.mesh.position.lerp(this.targetPos, lerpFactor);
+                // 音频响应：灯光对音频反应更强烈
+                let audioScaleFactor = this.type === 'LIGHT' ? 0.8 : (this.type === 'PHOTO' ? 0.15 : 0.3);
+                const s = 1 + audioImpact * audioScaleFactor;
+                const finalScale = this.targetScale.clone().multiply(this.baseScale).multiplyScalar(s);
+                this.mesh.scale.lerp(finalScale, 0.1);
+                
+                this.mesh.quaternion.slerp(new THREE.Quaternion().setFromEuler(this.targetRot), lerpFactor);
+                if(this.autoRotate && STATE.MODE !== 'FOCUS') {
+                    this.mesh.rotation.x += this.autoRotate.x; this.mesh.rotation.y += this.autoRotate.y;
+                }
+            }
+        }
+
+        // --- 主引擎 ---
+        class ChristmasEngine {
+            constructor() {
+                this.container = document.getElementById('three-canvas');
+                this.elements = [];
+                this.init();
+            }
+
+            async init() {
+                this.scene = new THREE.Scene();
+                this.camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 1000);
+                this.camera.position.set(0, 2, 55); // 稍微拉远相机以容纳更大的树
+
+                this.renderer = new THREE.WebGLRenderer({ canvas: this.container, antialias: true });
+                this.renderer.setSize(window.innerWidth, window.innerHeight);
+                // 使用 ACESFilmic 获得更有电影感的色彩
+                this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
+                this.renderer.toneMappingExposure = 1.2;
+
+                const pmrem = new THREE.PMREMGenerator(this.renderer);
+                this.scene.environment = pmrem.fromScene(new RoomEnvironment(), 0.04).texture;
+                
+                this.setupLights();
+                this.setupPostProcessing();
+                this.setupAudio();
+                
+                this.mainGroup = new THREE.Group();
+                this.scene.add(this.mainGroup);
+
+                await this.createCandyTexture();
+                await this.createVibrantAssets(); // 新的资产创建函数
+                await this.initHandTracking();
+                this.setupEventListeners();
+                
+                document.getElementById('spinner').style.display = 'none';
+                const startBtn = document.getElementById('start-btn');
+                startBtn.style.display = 'block';
+                startBtn.onclick = () => {
+                    this.startAudio();
+                    document.getElementById('loader').style.opacity = '0';
+                    setTimeout(() => document.getElementById('loader').remove(), 1000);
+                    this.animate();
+                };
+            }
+
+            setupAudio() {
+                this.listener = new THREE.AudioListener();
+                this.camera.add(this.listener);
+                this.sound = new THREE.Audio(this.listener);
+                this.audioLoader = new THREE.AudioLoader();
+                this.analyser = new THREE.AudioAnalyser(this.sound, 64); // 提高频段分析精度
+                this.audioLoader.load('https://actions.google.com/sounds/v1/science_fiction/low_poly_rhodes.ogg', (buffer) => {
+                    this.sound.setBuffer(buffer); this.sound.setLoop(true); this.sound.setVolume(0.6);
+                });
+            }
+            startAudio() { if (this.sound.buffer) this.sound.play(); }
+
+            setupLights() {
+                // 增强环境光以展示更多色彩细节
+                this.scene.add(new THREE.AmbientLight(0xffffff, 0.8));
+                // 主金色射灯
+                const spot1 = new THREE.SpotLight(PALETTE.gold, 1500);
+                spot1.position.set(30, 50, 40); spot1.angle = 0.6; spot1.penumbra = 0.5;
+                this.scene.add(spot1);
+                // 冷色补光，增加对比度
+                const blueLight = new THREE.SpotLight(PALETTE.sapphire, 800);
+                blueLight.position.set(-30, 30, -30);
+                this.scene.add(blueLight);
+                 // 底部暖光向上打
+                const bottomLight = new THREE.PointLight(PALETTE.ruby, 5, 50);
+                bottomLight.position.set(0, -10, 0);
+                this.scene.add(bottomLight);
+            }
+
+            setupPostProcessing() {
+                this.composer = new EffectComposer(this.renderer);
+                this.composer.addPass(new RenderPass(this.scene, this.camera));
+                // 调整辉光参数，让自发光物体更亮
+                this.bloomPass = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 0.6, 0.5, 0.8);
+                this.composer.addPass(this.bloomPass);
+            }
+
+            async createCandyTexture() {
+                const canvas = document.createElement('canvas'); canvas.width = 256; canvas.height = 256;
+                const ctx = canvas.getContext('2d');
+                ctx.fillStyle = '#ffffff'; ctx.fillRect(0,0,256,256);
+                ctx.fillStyle = '#ff0000';
+                for(let i=0; i<6; i++) { ctx.beginPath(); ctx.moveTo(i*50, 0); ctx.lineTo(i*50+100, 256); ctx.lineTo(i*50+150, 256); ctx.lineTo(i*50+50, 0); ctx.fill(); }
+                this.candyTexture = new THREE.CanvasTexture(canvas);
+                this.candyTexture.wrapS = this.candyTexture.wrapT = THREE.RepeatWrapping; this.candyTexture.repeat.set(4, 1);
+            }
+
+            // --- 核心升级：创建丰富多样的装饰 ---
+            async createVibrantAssets() {
+                // 1. 定义多种几何体
+                const geoSphere = new THREE.SphereGeometry(0.3, 32, 32); // 更光滑的球体
+                const geoBox = new THREE.BoxGeometry(0.4, 0.4, 0.4);
+                const geoJewel = new THREE.IcosahedronGeometry(0.35, 0); // 宝石形状
+                const geoTorus = new THREE.TorusGeometry(0.25, 0.08, 16, 32); // 装饰环
+                const geoLight = new THREE.SphereGeometry(0.1, 8, 8); // 小灯泡
+
+                // 2. 定义材质生成器
+                const getMat = (color, isShiny = false) => new THREE.MeshPhysicalMaterial({
+                    color: color, metalness: isShiny ? 1.0 : 0.4, roughness: isShiny ? 0.1 : 0.6,
+                    clearcoat: isShiny ? 1.0 : 0.0, clearcoatRoughness: 0.1, envMapIntensity: isShiny ? 1.5 : 1.0
+                });
+                // 自发光材质（灯串）
+                const lightMat = new THREE.MeshStandardMaterial({
+                    color: PALETTE.emissiveWarm, emissive: PALETTE.emissiveWarm, emissiveIntensity: 2.0, toneMapped: false
+                });
+                const candyMat = new THREE.MeshStandardMaterial({ map: this.candyTexture, roughness: 0.3 });
+
+                // 3. 大量生成装饰品 (数量提升至 3500)
+                const TOTAL_DECO = 3500;
+                for(let i=0; i<TOTAL_DECO; i++) {
+                    let mesh, type = 'DECO';
+                    const rand = Math.random();
+                    const color = DECO_COLORS[Math.floor(Math.random() * DECO_COLORS.length)];
+
+                    if (rand < 0.15) { // 15% 节日彩灯 (Lights)
+                        mesh = new THREE.Mesh(geoLight, lightMat);
+                        type = 'LIGHT';
+                    } else if (rand < 0.35) { // 20% 宝石 (Jewels)
+                        mesh = new THREE.Mesh(geoJewel, getMat(color, true));
+                        type = 'JEWEL';
+                    } else if (rand < 0.55) { // 20% 光滑球体 (Baubles)
+                        mesh = new THREE.Mesh(geoSphere, getMat(color, true));
+                    } else if (rand < 0.7) { // 15% 装饰环 (Rings)
+                        mesh = new THREE.Mesh(geoTorus, getMat(PALETTE.gold, true));
+                    } else if (rand < 0.85) { // 15% 哑光方块 (Boxes)
+                        mesh = new THREE.Mesh(geoBox, getMat(color, false));
+                    } else { // 15% 糖果手杖 (Candy Canes)
+                        mesh = new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3([new THREE.Vector3(0,0,0), new THREE.Vector3(0,0.8,0), new THREE.Vector3(0.2, 1, 0)]), 10, 0.08, 8, false), candyMat);
+                    }
+                    
+                    // 随机初始缩放，增加多样性
+                    mesh.scale.multiplyScalar(0.8 + Math.random() * 0.5);
+                    this.mainGroup.add(mesh);
+                    this.elements.push(new MagicElement(mesh, type));
+                }
+
+                // 4. 添加树顶星 (Topper)
+                const topperGeo = new THREE.IcosahedronGeometry(1.5, 1);
+                const topperMat = new THREE.MeshStandardMaterial({
+                    color: PALETTE.gold, emissive: PALETTE.gold, emissiveIntensity: 1.5, metalness: 1, roughness: 0.2
+                });
+                const topperMesh = new THREE.Mesh(topperGeo, topperMat);
+                this.mainGroup.add(topperMesh);
+                this.topperElement = new MagicElement(topperMesh, 'TOPPER');
+                this.elements.push(this.topperElement);
+
+                // 5. 添加环境尘埃
+                const dust = new THREE.Points(new THREE.BufferGeometry().setAttribute('position', new THREE.BufferAttribute(new Float32Array(3000*3).map
